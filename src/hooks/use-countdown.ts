@@ -11,7 +11,7 @@ interface CountdownResult {
   formatted: string;
 }
 
-export function useCountdown(targetDate: Date): CountdownResult {
+export function useCountdown(targetDate: Date | string | number): CountdownResult {
   const [now, setNow] = useState(Date.now());
 
   useEffect(() => {
@@ -19,7 +19,8 @@ export function useCountdown(targetDate: Date): CountdownResult {
     return () => clearInterval(interval);
   }, []);
 
-  const diff = targetDate.getTime() - now;
+  const target = targetDate instanceof Date ? targetDate : new Date(targetDate);
+  const diff = target.getTime() - now;
 
   if (diff <= 0) {
     return { days: 0, hours: 0, minutes: 0, seconds: 0, isExpired: true, formatted: "Closed" };
