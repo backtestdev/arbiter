@@ -1,0 +1,144 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Platform {
+  KALSHI
+  POLYMARKET
+}
+
+enum Side {
+  YES
+  NO
+}
+
+enum MarketStatus {
+  ACTIVE
+  CLOSED
+  RESOLVED
+}
+
+enum ArbitrageStatus {
+  ACTIVE
+  EXPIRED
+  EXECUTED
+}
+
+model User {
+  id            String    @id @default(cuid())
+  email         String?   @unique
+  walletAddress String?   @unique
+  name          String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  credentials UserPlatformCredential[]
+  positions   Position[]
+
+  @@map("users")
+}
+
+model Market {
+  id              String       @id @default(cuid())
+  externalId      String
+  platform        Platform
+  title           String
+  description     String       @default("")
+  category        String       @default("general")
+  yesPrice        Float        @default(0.5)
+  noPrice         Float        @default(0.5)
+  volume24h       Float        @default(0)
+  liquidity       Float        @default(0)
+  closingTime     DateTime
+  resolvedAt      DateTime?
+  resolution      Side?
+  status          MarketStatus @default(ACTIVE)
+  matchedMarketId String?
+  matchConfidence Float?
+  lastUpdated     DateTime     @default(now())
+  createdAt       DateTime     @default(now())
+
+  matchedMarket Market?  @relation("MarketMatch", fields: [matchedMarketId], references: [id])
+  matchedBy     Market[] @relation("MarketMatch")
+
+  arbOppsA ArbitrageOpportunity[] @relation("ArbMarketA")
+  arbOppsB ArbitrageOpportunity[] @relation("ArbMarketB")
+
+  positions Position[]
+
+  @@unique([externalId, platform])
+  @@index([platform, status])
+  @@index([category])
+  @@index([matchedMarketId])
+  @@map("markets")
+}
+
+model ArbitrageOpportunity {
+  id                String          @id @default(cuid())
+  marketAId         String
+  marketBId         String
+  spreadPercent     Float
+  yesArb            Boolean         @default(false)
+  noArb             Boolean         @default(false)
+  estimatedProfit100 Float
+  detectedAt        DateTime        @default(now())
+  expiresAt         DateTime
+  status            ArbitrageStatus @default(ACTIVE)
+
+  marketA Market @relation("ArbMarketA", fields: [marketAId], references: [id])
+  marketB Market @relation("ArbMarketB", fields: [marketBId], references: [id])
+
+  @@index([status, spreadPercent])
+  @@map("arbitrage_opportunities")
+}
+
+model Position {
+  id           String   @id @default(cuid())
+  userId       String
+  platform     Platform
+  marketId     String
+  side         Side
+  shares       Float
+  avgPrice     Float
+  currentPrice Float    @default(0)
+  pnl          Float    @default(0)
+  openedAt     DateTime @default(now())
+  closedAt     DateTime?
+  updatedAt    DateTime @updatedAt
+
+  user   User   @relation(fields: [userId], references: [id])
+  market Market @relation(fields: [marketId], references: [id])
+
+  @@index([userId, platform])
+  @@map("positions")
+}
+
+model UserPlatformCredential {
+  id                  String   @id @default(cuid())
+  userId              String
+  platform            Platform
+  encryptedCredential String
+  connectedAt         DateTime @default(now())
+  lastValidated       DateTime?
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@unique([userId, platform])
+  @@map("user_platform_credentials")
+}
+
+model PriceHistory {
+  id        String   @id @default(cuid())
+  marketId  String
+  yesPrice  Float
+  noPrice   Float
+  timestamp DateTime @default(now())
+
+  @@index([marketId, timestamp])
+  @@map("price_history")
+}
