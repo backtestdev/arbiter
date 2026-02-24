@@ -12,7 +12,7 @@ import { useUIStore } from "@/stores/ui-store";
 import { cn } from "@/lib/utils";
 import type { Market, UnifiedMarket } from "@/types";
 
-const CATEGORIES = ["All", "Politics", "Crypto", "Economics", "Finance", "Technology"] as const;
+const CATEGORIES = ["All", "Politics", "Crypto", "Economics", "Finance", "Technology", "Sports", "Culture"] as const;
 
 interface MarketSyncResponse {
   markets: Market[];

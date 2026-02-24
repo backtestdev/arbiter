@@ -7,12 +7,14 @@ import { motion } from "framer-motion";
 import { PageHeader } from "@/components/layout/page-header";
 import { PriceChart, PriceChartSkeleton } from "@/components/market/price-chart";
 import { TradePanel } from "@/components/trade/trade-panel";
+import { OrderbookDisplay, OrderbookSkeleton } from "@/components/market/orderbook-display";
+import { SettlementComparison, SingleSettlementRules } from "@/components/market/settlement-comparison";
 import { usePriceStream } from "@/hooks/use-price-stream";
 import { useLiveMarket } from "@/hooks/use-live-market";
 import { usePriceFlash } from "@/hooks/use-price-flash";
 import { cn, formatPrice, formatCompactNumber, formatCurrency, calculateSpread } from "@/lib/utils";
 import { useCountdown } from "@/hooks/use-countdown";
-import type { Market } from "@/types";
+import type { Market, Side } from "@/types";
 
 interface MarketSyncResponse {
   markets: Market[];
@@ -49,6 +51,9 @@ function LivePriceDisplay({
 }) {
   const yesFlash = usePriceFlash(market.yesPrice);
   const noFlash = usePriceFlash(market.noPrice);
+
+  const bestYesAsk = market.orderbook.yes.asks[0]?.price;
+  const bestYesBid = market.orderbook.yes.bids[0]?.price;
 
   return (
     <div className="glass rounded-2xl p-5 space-y-4">
@@ -89,6 +94,17 @@ function LivePriceDisplay({
         <span>Vol: {formatCompactNumber(market.volume24h)}</span>
         <span>Liq: {formatCompactNumber(market.liquidity)}</span>
       </div>
+      {/* Bid/ask spread */}
+      {bestYesBid !== undefined && bestYesAsk !== undefined && (
+        <div className="flex items-center justify-between text-xs text-text-muted border-t border-arbiter-border-subtle pt-2">
+          <span>
+            Bid {formatPrice(bestYesBid)} / Ask {formatPrice(bestYesAsk)}
+          </span>
+          <span>
+            Spread {Math.round((bestYesAsk - bestYesBid) * 100)}¢
+          </span>
+        </div>
+      )}
     </div>
   );
 }
@@ -100,12 +116,24 @@ function SpreadIndicator({
   marketA: Market;
   marketB: Market;
 }) {
+  // Use orderbook ask prices for more accurate arb detection
+  const bestYesAskA = marketA.orderbook.yes.asks[0]?.price ?? marketA.yesPrice;
+  const bestNoAskA = marketA.orderbook.no.asks[0]?.price ?? marketA.noPrice;
+  const bestYesAskB = marketB.orderbook.yes.asks[0]?.price ?? marketB.yesPrice;
+  const bestNoAskB = marketB.orderbook.no.asks[0]?.price ?? marketB.noPrice;
+
   const spread = calculateSpread(marketA.yesPrice, marketB.yesPrice);
-  const costAB = marketA.yesPrice + marketB.noPrice;
-  const costBA = marketB.yesPrice + marketA.noPrice;
+
+  // Check both arb directions using orderbook asks
+  const costAB = bestYesAskA + bestNoAskB; // Buy YES on A, Buy NO on B
+  const costBA = bestYesAskB + bestNoAskA; // Buy YES on B, Buy NO on A
   const minCost = Math.min(costAB, costBA);
-  const hasArb = minCost < 0.99;
+  const hasArb = minCost < 1.0;
   const arbProfit = hasArb ? (1 - minCost) * 100 : 0;
+
+  const buyDirection = costAB <= costBA
+    ? { buy: "YES", buyPlatform: marketA.platform, sell: "NO", sellPlatform: marketB.platform }
+    : { buy: "YES", buyPlatform: marketB.platform, sell: "NO", sellPlatform: marketA.platform };
 
   return (
     <motion.div
@@ -147,6 +175,17 @@ function SpreadIndicator({
           </div>
         )}
       </div>
+      {hasArb && (
+        <div className="flex items-center gap-2 text-xs text-text-muted border-t border-arbiter-border-subtle pt-2">
+          <span>
+            Buy {buyDirection.buy} on{" "}
+            <span className="text-text-secondary font-medium">{buyDirection.buyPlatform}</span>
+            {" + "}
+            Buy {buyDirection.sell} on{" "}
+            <span className="text-text-secondary font-medium">{buyDirection.sellPlatform}</span>
+          </span>
+        </div>
+      )}
     </motion.div>
   );
 }
@@ -161,9 +200,12 @@ function DetailSkeleton() {
         </div>
       </div>
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        <div className="lg:col-span-2 glass rounded-2xl p-5">
-          <div className="skeleton h-5 w-32 mb-4" />
-          <PriceChartSkeleton height={300} />
+        <div className="lg:col-span-2 space-y-6">
+          <div className="glass rounded-2xl p-5">
+            <div className="skeleton h-5 w-32 mb-4" />
+            <PriceChartSkeleton height={300} />
+          </div>
+          <OrderbookSkeleton />
         </div>
         <div className="space-y-4">
           <div className="glass rounded-2xl p-5 space-y-4">
@@ -190,6 +232,7 @@ export default function TradePage() {
   const marketId = params.id as string;
   const [tradePanelOpen, setTradePanelOpen] = useState(false);
   const [activePeriod, setActivePeriod] = useState("24h");
+  const [bookSide, setBookSide] = useState<Side>("YES");
 
   const { data, isLoading } = useQuery<MarketSyncResponse>({
     queryKey: ["markets"],
@@ -249,38 +292,104 @@ export default function TradePage() {
       />
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* Chart section */}
-        <motion.div
-          initial={{ opacity: 0, y: 12 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.4 }}
-          className="lg:col-span-2 glass rounded-2xl p-5"
-        >
-          <div className="flex items-center justify-between mb-4">
-            <h2 className="text-lg font-semibold text-text-primary">
-              Price History
-            </h2>
-            <div className="flex gap-1 p-1 rounded-lg bg-arbiter-elevated">
-              {(["24h", "7d", "30d"] as const).map((period) => (
-                <button
-                  key={period}
-                  onClick={() => setActivePeriod(period)}
-                  className={cn(
-                    "px-3 py-1 rounded-md text-xs font-medium transition-all duration-150",
-                    activePeriod === period
-                      ? "bg-indigo-500/15 text-indigo-400"
-                      : "text-text-muted hover:text-text-secondary"
-                  )}
-                >
-                  {period}
-                </button>
-              ))}
+        {/* Left column: chart + orderbook + settlement */}
+        <div className="lg:col-span-2 space-y-6">
+          {/* Chart section */}
+          <motion.div
+            initial={{ opacity: 0, y: 12 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.4 }}
+            className="glass rounded-2xl p-5"
+          >
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="text-lg font-semibold text-text-primary">
+                Price History
+              </h2>
+              <div className="flex gap-1 p-1 rounded-lg bg-arbiter-elevated">
+                {(["24h", "7d", "30d"] as const).map((period) => (
+                  <button
+                    key={period}
+                    onClick={() => setActivePeriod(period)}
+                    className={cn(
+                      "px-3 py-1 rounded-md text-xs font-medium transition-all duration-150",
+                      activePeriod === period
+                        ? "bg-indigo-500/15 text-indigo-400"
+                        : "text-text-muted hover:text-text-secondary"
+                    )}
+                  >
+                    {period}
+                  </button>
+                ))}
+              </div>
             </div>
-          </div>
-          <PriceChart data={priceHistory} height={300} showTooltip />
-        </motion.div>
+            <PriceChart data={priceHistory} height={300} showTooltip />
+          </motion.div>
 
-        {/* Price panels and trade CTA */}
+          {/* Orderbook section */}
+          <motion.div
+            initial={{ opacity: 0, y: 12 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.4, delay: 0.1 }}
+            className="glass rounded-2xl p-5 space-y-4"
+          >
+            <div className="flex items-center justify-between">
+              <h2 className="text-lg font-semibold text-text-primary">
+                Orderbook
+              </h2>
+              <div className="flex gap-1 p-1 rounded-lg bg-arbiter-elevated">
+                {(["YES", "NO"] as const).map((s) => (
+                  <button
+                    key={s}
+                    onClick={() => setBookSide(s)}
+                    className={cn(
+                      "px-3 py-1 rounded-md text-xs font-semibold transition-all duration-150",
+                      bookSide === s
+                        ? s === "YES"
+                          ? "bg-profit/15 text-profit"
+                          : "bg-loss/15 text-loss"
+                        : "text-text-muted hover:text-text-secondary"
+                    )}
+                  >
+                    {s}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div>
+                <p className="text-2xs font-semibold uppercase tracking-wider text-text-tertiary mb-2">
+                  {market.platform}
+                </p>
+                <OrderbookDisplay
+                  orderbook={market.orderbook}
+                  side={bookSide}
+                  onPriceClick={() => setTradePanelOpen(true)}
+                />
+              </div>
+              {matchedMarket && (
+                <div>
+                  <p className="text-2xs font-semibold uppercase tracking-wider text-text-tertiary mb-2">
+                    {matchedMarket.platform}
+                  </p>
+                  <OrderbookDisplay
+                    orderbook={matchedMarket.orderbook}
+                    side={bookSide}
+                  />
+                </div>
+              )}
+            </div>
+          </motion.div>
+
+          {/* Settlement comparison */}
+          {matchedMarket ? (
+            <SettlementComparison marketA={market} marketB={matchedMarket} />
+          ) : (
+            <SingleSettlementRules market={market} />
+          )}
+        </div>
+
+        {/* Right column: prices, spread, trade CTA */}
         <div className="space-y-4">
           <motion.div
             initial={{ opacity: 0, y: 12 }}
