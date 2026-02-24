@@ -27,6 +27,18 @@ export function normalizeKalshiMarket(raw: KalshiMarket): Market {
     status: raw.status === "active" ? "ACTIVE" : raw.result ? "RESOLVED" : "CLOSED",
     matchedMarketId: null,
     lastUpdated: new Date(),
+    orderbook: {
+      yes: { bids: [], asks: [] },
+      no: { bids: [], asks: [] },
+      lastTradePrice: yesPrice,
+      timestamp: Date.now(),
+    },
+    settlementRules: {
+      source: "Kalshi",
+      criteria: raw.subtitle || raw.title,
+      expirationDate: raw.close_time,
+      timezone: "ET",
+    },
   };
 }
 
@@ -42,6 +54,8 @@ export function normalizePolymarketMarket(raw: PolymarketMarket): Market {
     (t) => t.outcome.toLowerCase() === "no"
   );
 
+  const yesPrice = yesToken?.price ?? 0.5;
+
   return {
     id: `poly_${raw.condition_id}`,
     externalId: raw.condition_id,
@@ -49,7 +63,7 @@ export function normalizePolymarketMarket(raw: PolymarketMarket): Market {
     title: raw.question,
     description: raw.description || "",
     category: raw.category || "general",
-    yesPrice: yesToken?.price ?? 0.5,
+    yesPrice,
     noPrice: noToken?.price ?? 0.5,
     volume24h: raw.volume_num || raw.volume || 0,
     liquidity: raw.liquidity || 0,
@@ -59,6 +73,18 @@ export function normalizePolymarketMarket(raw: PolymarketMarket): Market {
     status: raw.closed ? "CLOSED" : raw.active ? "ACTIVE" : "RESOLVED",
     matchedMarketId: null,
     lastUpdated: new Date(),
+    orderbook: {
+      yes: { bids: [], asks: [] },
+      no: { bids: [], asks: [] },
+      lastTradePrice: yesPrice,
+      timestamp: Date.now(),
+    },
+    settlementRules: {
+      source: "UMA Optimistic Oracle",
+      criteria: raw.description || raw.question,
+      expirationDate: raw.end_date_iso || "2025-12-31",
+      timezone: "UTC",
+    },
   };
 }
 

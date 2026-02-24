@@ -7,6 +7,7 @@ import type { ArbitrageOpportunity } from "@/types";
 /**
  * Applies live SSE price updates to arbitrage opportunities,
  * recalculating spreads and estimated profits in real-time.
+ * Preserves orderbook depth data from the initial scan.
  */
 export function useLiveArbitrage(
   opportunities: ArbitrageOpportunity[]
@@ -29,27 +30,49 @@ export function useLiveArbitrage(
         ? { ...opp.marketB, yesPrice: liveB.yesPrice, noPrice: liveB.noPrice }
         : opp.marketB;
 
-      // Recalculate spread and profit with live prices
-      const spreadYes = Math.abs(marketA.yesPrice - marketB.yesPrice);
-      const spreadPercent = parseFloat((spreadYes * 100).toFixed(1));
+      // Recalculate spread using best ask prices from orderbooks
+      const yesAsksA = marketA.orderbook.yes.asks;
+      const noAsksA = marketA.orderbook.no.asks;
+      const yesAsksB = marketB.orderbook.yes.asks;
+      const noAsksB = marketB.orderbook.no.asks;
 
-      const costAB = marketA.yesPrice + marketB.noPrice;
-      const costBA = marketB.yesPrice + marketA.noPrice;
-      const minCost = Math.min(costAB, costBA);
-      const estimatedProfit100 =
-        minCost < 1 ? parseFloat(((1 - minCost) * 100).toFixed(2)) : 0;
+      let bestBuyPrice = opp.bestBuyPrice;
+      let bestSellPrice = opp.bestSellPrice;
 
-      const yesArb = costAB < 0.99;
-      const noArb = costBA < 0.99;
+      if (opp.yesArb) {
+        if (opp.buyPlatform === marketA.platform) {
+          bestBuyPrice = yesAsksA[0]?.price ?? opp.bestBuyPrice;
+          bestSellPrice = noAsksB[0]?.price ?? opp.bestSellPrice;
+        } else {
+          bestBuyPrice = yesAsksB[0]?.price ?? opp.bestBuyPrice;
+          bestSellPrice = noAsksA[0]?.price ?? opp.bestSellPrice;
+        }
+      } else {
+        if (opp.buyPlatform === marketB.platform) {
+          bestBuyPrice = yesAsksB[0]?.price ?? opp.bestBuyPrice;
+          bestSellPrice = noAsksA[0]?.price ?? opp.bestSellPrice;
+        } else {
+          bestBuyPrice = yesAsksA[0]?.price ?? opp.bestBuyPrice;
+          bestSellPrice = noAsksB[0]?.price ?? opp.bestSellPrice;
+        }
+      }
+
+      const combinedCost = bestBuyPrice + bestSellPrice;
+      const spreadPerShare = Math.max(0, 1.0 - combinedCost);
+      const spreadPercent = parseFloat((spreadPerShare * 100).toFixed(2));
+      const maxExecutableProfit = parseFloat(
+        (opp.executableDepth.maxSize * spreadPerShare).toFixed(2),
+      );
 
       return {
         ...opp,
         marketA,
         marketB,
+        bestBuyPrice,
+        bestSellPrice,
         spreadPercent,
-        estimatedProfit100,
-        yesArb,
-        noArb,
+        estimatedProfit100: parseFloat((spreadPerShare * 100).toFixed(2)),
+        maxExecutableProfit: Math.max(0, maxExecutableProfit),
       };
     });
   }, [opportunities, prices]);

@@ -3,7 +3,8 @@
 import { useState, useCallback, useMemo, useEffect, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { cn, formatPrice, formatCurrency } from "@/lib/utils";
-import type { Market, Platform, Side } from "@/types";
+import { OrderbookDisplay } from "@/components/market/orderbook-display";
+import type { Market, Platform, Side, OrderType, OrderbookLevel } from "@/types";
 
 // ---------------------------------------------------------------------------
 // Props
@@ -33,6 +34,60 @@ interface PlatformOption {
 // ---------------------------------------------------------------------------
 
 type TradeStep = "configure" | "confirm" | "executing" | "success";
+
+// ---------------------------------------------------------------------------
+// Orderbook walk result
+// ---------------------------------------------------------------------------
+
+interface WalkResult {
+  avgPrice: number;
+  filledShares: number;
+  filledAmount: number;
+}
+
+// ---------------------------------------------------------------------------
+// Helper: walk the orderbook to compute average fill price for a $ amount
+// ---------------------------------------------------------------------------
+
+function walkOrderbook(
+  levels: OrderbookLevel[],
+  amount: number,
+): WalkResult {
+  if (amount <= 0 || levels.length === 0) {
+    return { avgPrice: 0, filledShares: 0, filledAmount: 0 };
+  }
+
+  let remainingDollars = amount;
+  let totalShares = 0;
+  let totalSpent = 0;
+
+  for (const level of levels) {
+    if (remainingDollars <= 0) break;
+
+    // Max shares we can buy at this price level
+    const maxSharesAtLevel = level.quantity;
+    const costForAllShares = maxSharesAtLevel * level.price;
+
+    if (costForAllShares <= remainingDollars) {
+      // Consume the entire level
+      totalShares += maxSharesAtLevel;
+      totalSpent += costForAllShares;
+      remainingDollars -= costForAllShares;
+    } else {
+      // Partially consume this level
+      const sharesBought = remainingDollars / level.price;
+      totalShares += sharesBought;
+      totalSpent += remainingDollars;
+      remainingDollars = 0;
+    }
+  }
+
+  return {
+    avgPrice: totalShares > 0 ? totalSpent / totalShares : 0,
+    filledShares: totalShares,
+    filledAmount: totalSpent,
+  };
+}
 
 // ---------------------------------------------------------------------------
 // Animation variants
@@ -162,6 +217,58 @@ function SideSelector({
   );
 }
 
+/** Compact toggle between Market and Limit order types. */
+function OrderTypeSelector({
+  selected,
+  onSelect,
+}: {
+  selected: OrderType;
+  onSelect: (type: OrderType) => void;
+}) {
+  return (
+    <div className="flex flex-col gap-2">
+      <label className="text-2xs font-semibold uppercase tracking-wider text-text-tertiary">
+        Order Type
+      </label>
+      <div className="flex items-center gap-1 p-0.5 rounded-lg bg-arbiter-elevated border border-arbiter-border-subtle">
+        {(["market", "limit"] as const).map((type) => {
+          const isActive = selected === type;
+
+          return (
+            <button
+              key={type}
+              type="button"
+              onClick={() => onSelect(type)}
+              className={cn(
+                "relative flex-1 px-4 py-1.5 rounded-md text-xs font-semibold",
+                "transition-colors duration-200 ease-spring capitalize",
+                isActive
+                  ? "text-text-primary"
+                  : "text-text-muted hover:text-text-secondary",
+              )}
+            >
+              {isActive && (
+                <motion.span
+                  layoutId="order-type-pill"
+                  className="absolute inset-0 rounded-md bg-indigo-500/15 border border-indigo-500/30"
+                  transition={{
+                    type: "spring",
+                    damping: 25,
+                    stiffness: 300,
+                  }}
+                />
+              )}
+              <span className={cn("relative z-10", isActive && "text-indigo-400")}>
+                {type}
+              </span>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 /** Platform selector radio showing platform name, price, and liquidity. */
 function PlatformSelector({
   platforms,
@@ -248,18 +355,37 @@ function PlatformSelector({
   );
 }
 
-/** Dollar amount input with shares/payout calculation. */
+/** Dollar amount input with shares/payout calculation, slider, and orderbook-aware estimates. */
 function PositionSizer({
   amount,
   onAmountChange,
+  orderType,
+  limitPrice,
+  onLimitPriceChange,
+  avgFillPrice,
   shares,
   payout,
+  maxCost,
+  bestAsk,
 }: {
   amount: string;
   onAmountChange: (val: string) => void;
+  orderType: OrderType;
+  limitPrice: string;
+  onLimitPriceChange: (val: string) => void;
+  avgFillPrice: number;
   shares: number;
   payout: number;
+  maxCost: number | null;
+  bestAsk: number;
 }) {
+  const parsedAmount = parseFloat(amount) || 0;
+  const profit = payout - parsedAmount;
+
+  // Slider range
+  const sliderMax = 1000;
+  const sliderValue = Math.min(parsedAmount, sliderMax);
+
   return (
     <div className="flex flex-col gap-3">
       <label className="text-2xs font-semibold uppercase tracking-wider text-text-tertiary">
@@ -290,40 +416,122 @@ function PositionSizer({
         />
       </div>
 
+      {/* Slider */}
+      <div className="px-1">
+        <input
+          type="range"
+          min={0}
+          max={sliderMax}
+          step={1}
+          value={sliderValue}
+          onChange={(e) => {
+            const val = Number(e.target.value);
+            onAmountChange(val > 0 ? String(val) : "");
+          }}
+          className={cn(
+            "w-full h-1.5 rounded-full appearance-none cursor-pointer",
+            "bg-arbiter-border-subtle",
+            "[&::-webkit-slider-thumb]:appearance-none",
+            "[&::-webkit-slider-thumb]:w-4 [&::-webkit-slider-thumb]:h-4",
+            "[&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-indigo-500",
+            "[&::-webkit-slider-thumb]:border-2 [&::-webkit-slider-thumb]:border-indigo-300",
+            "[&::-webkit-slider-thumb]:shadow-sm",
+            "[&::-webkit-slider-thumb]:transition-transform [&::-webkit-slider-thumb]:duration-150",
+            "[&::-webkit-slider-thumb]:hover:scale-110",
+            "[&::-moz-range-thumb]:w-4 [&::-moz-range-thumb]:h-4",
+            "[&::-moz-range-thumb]:rounded-full [&::-moz-range-thumb]:bg-indigo-500",
+            "[&::-moz-range-thumb]:border-2 [&::-moz-range-thumb]:border-indigo-300",
+            "[&::-moz-range-thumb]:shadow-sm",
+          )}
+        />
+      </div>
+
       {/* Quick amount buttons */}
-      <div className="flex items-center gap-2">
-        {[10, 25, 50, 100].map((preset) => (
+      <div className="flex items-center gap-1.5 flex-wrap">
+        {[10, 25, 50, 100, 250, 500, 1000].map((preset) => (
           <button
             key={preset}
             type="button"
             onClick={() => onAmountChange(String(preset))}
             className={cn(
-              "flex-1 py-1.5 rounded-lg text-xs font-medium",
+              "flex-1 min-w-[3rem] py-1.5 rounded-lg text-xs font-medium",
               "bg-arbiter-elevated border border-arbiter-border-subtle",
               "text-text-secondary hover:text-text-primary hover:border-arbiter-border",
               "transition-all duration-150 ease-spring",
               amount === String(preset) && "border-indigo-500/40 text-indigo-400",
             )}
           >
-            ${preset}
+            ${preset >= 1000 ? `${preset / 1000}k` : preset}
           </button>
         ))}
       </div>
 
-      {/* Shares & payout calculations */}
-      <div className="flex items-center justify-between px-1">
-        <div className="flex flex-col gap-0.5">
+      {/* Limit price input (limit orders only) */}
+      {orderType === "limit" && (
+        <div className="flex flex-col gap-2">
+          <label className="text-2xs font-semibold uppercase tracking-wider text-text-tertiary">
+            Limit Price
+          </label>
+          <div className="relative">
+            <input
+              type="text"
+              inputMode="decimal"
+              value={limitPrice}
+              onChange={(e) => {
+                const val = e.target.value;
+                if (val === "" || /^\d*\.?\d{0,4}$/.test(val)) {
+                  onLimitPriceChange(val);
+                }
+              }}
+              placeholder={bestAsk > 0 ? bestAsk.toFixed(2) : "0.00"}
+              className={cn(
+                "arbiter-input pr-10 text-right text-sm font-semibold tabular-nums",
+                "focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500/30",
+              )}
+            />
+            <span className="absolute right-4 top-1/2 -translate-y-1/2 text-text-muted text-2xs font-medium">
+              per share
+            </span>
+          </div>
+        </div>
+      )}
+
+      {/* Shares, fill price, & payout calculations */}
+      <div className="flex flex-col gap-2 px-1">
+        <div className="flex items-center justify-between">
+          <span className="text-2xs text-text-muted">Est. avg fill price</span>
+          <span className="text-xs font-semibold text-text-secondary tabular-nums" data-price>
+            {avgFillPrice > 0 ? formatPrice(avgFillPrice) : "--"}
+          </span>
+        </div>
+        <div className="flex items-center justify-between">
           <span className="text-2xs text-text-muted">Shares</span>
-          <span className="text-sm font-semibold text-text-primary tabular-nums" data-price>
+          <span className="text-xs font-semibold text-text-primary tabular-nums" data-price>
             {shares > 0 ? shares.toFixed(2) : "--"}
           </span>
         </div>
-        <div className="flex flex-col gap-0.5 items-end">
+        {orderType === "limit" && maxCost !== null && (
+          <div className="flex items-center justify-between">
+            <span className="text-2xs text-text-muted">Max cost</span>
+            <span className="text-xs font-semibold text-text-secondary tabular-nums" data-price>
+              {maxCost > 0 ? formatCurrency(maxCost) : "--"}
+            </span>
+          </div>
+        )}
+        <div className="flex items-center justify-between">
           <span className="text-2xs text-text-muted">Payout if correct</span>
-          <span className="text-sm font-semibold text-profit tabular-nums" data-price>
+          <span className="text-xs font-semibold text-profit tabular-nums" data-price>
             {payout > 0 ? formatCurrency(payout) : "--"}
           </span>
         </div>
+        {profit > 0 && (
+          <div className="flex items-center justify-between">
+            <span className="text-2xs text-text-muted">Potential profit</span>
+            <span className="text-xs font-semibold text-profit tabular-nums" data-price>
+              +{formatCurrency(profit)}
+            </span>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -331,30 +539,45 @@ function PositionSizer({
 
 /** Summary card showing trade details before confirmation. */
 function OrderSummary({
+  orderType,
   side,
   platform,
+  amount,
+  avgFillPrice,
   shares,
-  price,
-  total,
+  payout,
   profit,
+  limitPrice,
 }: {
+  orderType: OrderType;
   side: Side;
   platform: string;
+  amount: number;
+  avgFillPrice: number;
   shares: number;
-  price: number;
-  total: number;
+  payout: number;
   profit: number;
+  limitPrice?: number;
 }) {
   const isYes = side === "YES";
 
   const rows: { label: string; value: string; highlight?: boolean }[] = [
+    { label: "Order type", value: orderType === "market" ? "Market" : "Limit" },
     { label: "Side", value: side },
     { label: "Platform", value: platform },
-    { label: "Shares", value: shares.toFixed(2) },
-    { label: "Price per share", value: formatPrice(price) },
-    { label: "Total cost", value: formatCurrency(total) },
-    { label: "Potential profit", value: `+${formatCurrency(profit)}`, highlight: true },
+    { label: "Amount", value: formatCurrency(amount) },
+    { label: "Est. avg fill price", value: avgFillPrice > 0 ? formatPrice(avgFillPrice) : "--" },
+    { label: "Shares", value: shares > 0 ? shares.toFixed(2) : "--" },
   ];
+
+  if (orderType === "limit" && limitPrice !== undefined) {
+    rows.push({ label: "Limit price", value: formatPrice(limitPrice) });
+  }
+
+  rows.push(
+    { label: "Potential payout", value: payout > 0 ? formatCurrency(payout) : "--" },
+    { label: "Potential profit", value: profit > 0 ? `+${formatCurrency(profit)}` : "--", highlight: profit > 0 },
+  );
 
   return (
     <div className="flex flex-col gap-0.5 rounded-xl overflow-hidden border border-arbiter-border-subtle">
@@ -394,6 +617,12 @@ function PanelBodySkeleton() {
     <div className="flex flex-col gap-6 px-6 py-6 animate-pulse">
       {/* Side selector skeleton */}
       <div className="h-12 rounded-full bg-arbiter-elevated border border-arbiter-border-subtle" />
+
+      {/* Order type skeleton */}
+      <div className="flex flex-col gap-2">
+        <div className="h-3 w-20 rounded bg-arbiter-elevated" />
+        <div className="h-9 rounded-lg bg-arbiter-elevated border border-arbiter-border-subtle" />
+      </div>
 
       {/* Platform selector skeleton */}
       <div className="flex flex-col gap-2">
@@ -452,8 +681,10 @@ function buildPlatformOptions(
 export function TradePanel({ isOpen, marketId, markets, onClose }: TradePanelProps) {
   // -- State ----------------------------------------------------------------
   const [side, setSide] = useState<Side>("YES");
+  const [orderType, setOrderType] = useState<OrderType>("market");
   const [selectedPlatform, setSelectedPlatform] = useState<Platform>("POLYMARKET");
   const [amount, setAmount] = useState<string>("");
+  const [limitPrice, setLimitPrice] = useState<string>("");
   const [step, setStep] = useState<TradeStep>("configure");
   const [tradeError, setTradeError] = useState<string | null>(null);
 
@@ -485,18 +716,77 @@ export function TradePanel({ isOpen, marketId, markets, onClose }: TradePanelPro
     [platforms, selectedPlatform],
   );
 
-  const price = activePlatform
-    ? side === "YES"
-      ? activePlatform.yesPrice
-      : activePlatform.noPrice
-    : 0;
+  // Get the active market object (for orderbook access)
+  const activeMarket = useMemo(() => {
+    if (!market) return undefined;
+    if (market.platform === selectedPlatform) return market;
+    if (matchedMarket?.platform === selectedPlatform) return matchedMarket;
+    return market;
+  }, [market, matchedMarket, selectedPlatform]);
+
+  // Orderbook data for the currently selected side
+  const orderbookSide = useMemo(() => {
+    if (!activeMarket?.orderbook) return { bids: [], asks: [] };
+    return side === "YES"
+      ? activeMarket.orderbook.yes
+      : activeMarket.orderbook.no;
+  }, [activeMarket, side]);
+
+  const bestAsk = orderbookSide.asks[0]?.price ?? 0;
+
+  // Default limit price to best ask when switching to limit mode or changing side
+  useEffect(() => {
+    if (orderType === "limit" && limitPrice === "" && bestAsk > 0) {
+      setLimitPrice(bestAsk.toFixed(2));
+    }
+  }, [orderType, bestAsk, limitPrice]);
+
+  // Parsed values
   const parsedAmount = parseFloat(amount) || 0;
-  const shares = parsedAmount > 0 && price > 0 ? parsedAmount / price : 0;
-  // At $1/share resolution, payout = shares * $1
+  const parsedLimitPrice = parseFloat(limitPrice) || 0;
+
+  // Orderbook walk for market orders
+  const marketWalk = useMemo(
+    () => walkOrderbook(orderbookSide.asks, parsedAmount),
+    [orderbookSide.asks, parsedAmount],
+  );
+
+  // Calculate shares and avg fill price based on order type
+  const avgFillPrice = useMemo(() => {
+    if (orderType === "market") {
+      return marketWalk.avgPrice;
+    }
+    // For limit orders, the fill price is the limit price
+    return parsedLimitPrice;
+  }, [orderType, marketWalk.avgPrice, parsedLimitPrice]);
+
+  const shares = useMemo(() => {
+    if (parsedAmount <= 0 || avgFillPrice <= 0) return 0;
+    if (orderType === "market") {
+      return marketWalk.filledShares;
+    }
+    return parsedAmount / parsedLimitPrice;
+  }, [orderType, parsedAmount, avgFillPrice, marketWalk.filledShares, parsedLimitPrice]);
+
+  // Payout at $1/share resolution
   const payout = shares;
   const profit = payout - parsedAmount;
 
-  const canConfirm = parsedAmount > 0;
+  // Max cost for limit orders (capped by available depth)
+  const maxCost = useMemo(() => {
+    if (orderType !== "limit" || parsedLimitPrice <= 0) return null;
+    // Walk the book up to our limit price to see what's available
+    const levelsAtOrBelowLimit = orderbookSide.asks.filter(
+      (l) => l.price <= parsedLimitPrice,
+    );
+    const totalAvailable = levelsAtOrBelowLimit.reduce(
+      (acc, l) => acc + l.quantity * l.price,
+      0,
+    );
+    return Math.min(parsedAmount, totalAvailable);
+  }, [orderType, parsedLimitPrice, orderbookSide.asks, parsedAmount]);
+
+  const canConfirm = parsedAmount > 0 && (orderType === "market" || parsedLimitPrice > 0);
 
   // -- Reset selected platform when platforms change ------------------------
   useEffect(() => {
@@ -504,6 +794,14 @@ export function TradePanel({ isOpen, marketId, markets, onClose }: TradePanelPro
       setSelectedPlatform(platforms[0].platform);
     }
   }, [platforms, selectedPlatform]);
+
+  // -- Reset limit price when side or platform changes ---------------------
+  useEffect(() => {
+    if (orderType === "limit") {
+      setLimitPrice(bestAsk > 0 ? bestAsk.toFixed(2) : "");
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [side, selectedPlatform, orderType, bestAsk]);
 
   // -- Cleanup success timer on unmount -------------------------------------
   useEffect(() => {
@@ -522,7 +820,9 @@ export function TradePanel({ isOpen, marketId, markets, onClose }: TradePanelPro
     }
     setStep("configure");
     setAmount("");
+    setLimitPrice("");
     setSide("YES");
+    setOrderType("market");
     setTradeError(null);
     onClose();
   }, [onClose]);
@@ -536,6 +836,12 @@ export function TradePanel({ isOpen, marketId, markets, onClose }: TradePanelPro
   const handleBack = useCallback(() => {
     setTradeError(null);
     setStep("configure");
+  }, []);
+
+  const handleOrderbookPriceClick = useCallback((price: number) => {
+    // Switch to limit mode and set the clicked price
+    setOrderType("limit");
+    setLimitPrice(price.toFixed(2));
   }, []);
 
   const handleExecute = useCallback(async () => {
@@ -552,8 +858,10 @@ export function TradePanel({ isOpen, marketId, markets, onClose }: TradePanelPro
           marketId: market.id,
           platform: activePlatform.platform,
           side,
+          orderType,
+          amount: parsedAmount,
+          limitPrice: orderType === "limit" ? parsedLimitPrice : undefined,
           shares,
-          limitPrice: price,
         }),
       });
 
@@ -579,7 +887,7 @@ export function TradePanel({ isOpen, marketId, markets, onClose }: TradePanelPro
       setTradeError("Network error. Please try again.");
       setStep("confirm");
     }
-  }, [market, activePlatform, side, shares, price, handleClose]);
+  }, [market, activePlatform, side, orderType, parsedAmount, parsedLimitPrice, shares, handleClose]);
 
   // -- Render ---------------------------------------------------------------
   const marketNotFound = isOpen && marketId && !market;
@@ -658,6 +966,9 @@ export function TradePanel({ isOpen, marketId, markets, onClose }: TradePanelPro
                       {/* Side selector */}
                       <SideSelector selected={side} onSelect={setSide} />
 
+                      {/* Order type selector */}
+                      <OrderTypeSelector selected={orderType} onSelect={setOrderType} />
+
                       {/* Platform selector */}
                       <PlatformSelector
                         platforms={platforms}
@@ -666,12 +977,33 @@ export function TradePanel({ isOpen, marketId, markets, onClose }: TradePanelPro
                         onSelect={setSelectedPlatform}
                       />
 
+                      {/* Mini orderbook */}
+                      {activeMarket?.orderbook && (
+                        <div className="flex flex-col gap-2">
+                          <label className="text-2xs font-semibold uppercase tracking-wider text-text-tertiary">
+                            Orderbook
+                          </label>
+                          <OrderbookDisplay
+                            orderbook={activeMarket.orderbook}
+                            side={side}
+                            maxLevels={5}
+                            onPriceClick={handleOrderbookPriceClick}
+                          />
+                        </div>
+                      )}
+
                       {/* Position sizing */}
                       <PositionSizer
                         amount={amount}
                         onAmountChange={setAmount}
+                        orderType={orderType}
+                        limitPrice={limitPrice}
+                        onLimitPriceChange={setLimitPrice}
+                        avgFillPrice={avgFillPrice}
                         shares={shares}
                         payout={payout}
+                        maxCost={maxCost}
+                        bestAsk={bestAsk}
                       />
 
                       {/* Order summary preview */}
@@ -685,12 +1017,15 @@ export function TradePanel({ isOpen, marketId, markets, onClose }: TradePanelPro
                             Order Summary
                           </label>
                           <OrderSummary
+                            orderType={orderType}
                             side={side}
                             platform={activePlatform.label}
+                            amount={parsedAmount}
+                            avgFillPrice={avgFillPrice}
                             shares={shares}
-                            price={price}
-                            total={parsedAmount}
+                            payout={payout}
                             profit={profit}
+                            limitPrice={orderType === "limit" ? parsedLimitPrice : undefined}
                           />
                         </motion.div>
                       )}
@@ -745,7 +1080,8 @@ export function TradePanel({ isOpen, marketId, markets, onClose }: TradePanelPro
                             Review Your Trade
                           </span>
                           <span className="text-xs text-text-tertiary text-center max-w-[280px]">
-                            Please review the details below before executing your trade.
+                            Please review the details below before executing your{" "}
+                            {orderType === "market" ? "market" : "limit"} order.
                           </span>
                         </div>
                       </div>
@@ -775,12 +1111,15 @@ export function TradePanel({ isOpen, marketId, markets, onClose }: TradePanelPro
                       {/* Full summary */}
                       {activePlatform && (
                         <OrderSummary
+                          orderType={orderType}
                           side={side}
                           platform={activePlatform.label}
+                          amount={parsedAmount}
+                          avgFillPrice={avgFillPrice}
                           shares={shares}
-                          price={price}
-                          total={parsedAmount}
+                          payout={payout}
                           profit={profit}
+                          limitPrice={orderType === "limit" ? parsedLimitPrice : undefined}
                         />
                       )}
 
@@ -810,7 +1149,7 @@ export function TradePanel({ isOpen, marketId, markets, onClose }: TradePanelPro
                         Executing trade...
                       </span>
                       <span className="text-xs text-text-muted">
-                        Placing your order on {activePlatform?.label ?? "the platform"}
+                        Placing your {orderType} order on {activePlatform?.label ?? "the platform"}
                       </span>
                     </motion.div>
                   ) : (
@@ -872,7 +1211,7 @@ export function TradePanel({ isOpen, marketId, markets, onClose }: TradePanelPro
                         transition={{ delay: 0.5 }}
                         className="text-xs text-text-muted"
                       >
-                        Your order has been submitted successfully.
+                        Your {orderType} order has been submitted successfully.
                       </motion.span>
                     </motion.div>
                   )}
@@ -906,7 +1245,7 @@ export function TradePanel({ isOpen, marketId, markets, onClose }: TradePanelPro
                           : "bg-loss hover:bg-loss/90",
                       )}
                     >
-                      Execute Trade
+                      Execute {orderType === "market" ? "Market" : "Limit"} Order
                     </button>
                     <button
                       type="button"
