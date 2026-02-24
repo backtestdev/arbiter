@@ -7,6 +7,7 @@ interface UIState {
   tradePanelMarketId: string | null;
   connectionModalOpen: boolean;
   connections: Record<Platform, ConnectionStatus>;
+  mobileMenuOpen: boolean;
 
   toggleSidebar: () => void;
   setSidebarCollapsed: (collapsed: boolean) => void;
@@ -14,6 +15,8 @@ interface UIState {
   closeTradePanel: () => void;
   setConnectionModal: (open: boolean) => void;
   setConnectionStatus: (platform: Platform, status: ConnectionStatus) => void;
+  toggleMobileMenu: () => void;
+  setMobileMenuOpen: (open: boolean) => void;
 }
 
 export const useUIStore = create<UIState>((set) => ({
@@ -25,6 +28,7 @@ export const useUIStore = create<UIState>((set) => ({
     KALSHI: "disconnected",
     POLYMARKET: "disconnected",
   },
+  mobileMenuOpen: false,
 
   toggleSidebar: () =>
     set((state) => ({ sidebarCollapsed: !state.sidebarCollapsed })),
@@ -43,4 +47,9 @@ export const useUIStore = create<UIState>((set) => ({
     set((state) => ({
       connections: { ...state.connections, [platform]: status },
     })),
+
+  toggleMobileMenu: () =>
+    set((state) => ({ mobileMenuOpen: !state.mobileMenuOpen })),
+
+  setMobileMenuOpen: (open) => set({ mobileMenuOpen: open }),
 }));

@@ -1,9 +1,9 @@
 "use client";
 
-import { useState, useCallback, useMemo } from "react";
+import { useState, useCallback, useMemo, useEffect, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { cn, formatPrice, formatCurrency } from "@/lib/utils";
-import type { Platform, Side } from "@/types";
+import type { Market, Platform, Side } from "@/types";
 
 // ---------------------------------------------------------------------------
 // Props
@@ -12,11 +12,12 @@ import type { Platform, Side } from "@/types";
 interface TradePanelProps {
   isOpen: boolean;
   marketId: string | null;
+  markets: Market[];
   onClose: () => void;
 }
 
 // ---------------------------------------------------------------------------
-// Mock data
+// Platform option built from real market data
 // ---------------------------------------------------------------------------
 
 interface PlatformOption {
@@ -27,28 +28,11 @@ interface PlatformOption {
   liquidity: number;
 }
 
-const MOCK_MARKET = {
-  id: "market-btc-100k",
-  title: "Will Bitcoin exceed $100,000 by March 31, 2026?",
-  category: "Crypto",
-  closingTime: new Date("2026-03-31T23:59:59Z"),
-  platforms: [
-    {
-      platform: "KALSHI" as Platform,
-      label: "Kalshi",
-      yesPrice: 0.62,
-      noPrice: 0.38,
-      liquidity: 485_000,
-    },
-    {
-      platform: "POLYMARKET" as Platform,
-      label: "Polymarket",
-      yesPrice: 0.65,
-      noPrice: 0.35,
-      liquidity: 1_230_000,
-    },
-  ] satisfies PlatformOption[],
-};
+// ---------------------------------------------------------------------------
+// Trade execution state machine
+// ---------------------------------------------------------------------------
+
+type TradeStep = "configure" | "confirm" | "executing" | "success";
 
 // ---------------------------------------------------------------------------
 // Animation variants
@@ -404,58 +388,202 @@ function OrderSummary({
   );
 }
 
+/** Skeleton placeholder when market data is not yet available. */
+function PanelBodySkeleton() {
+  return (
+    <div className="flex flex-col gap-6 px-6 py-6 animate-pulse">
+      {/* Side selector skeleton */}
+      <div className="h-12 rounded-full bg-arbiter-elevated border border-arbiter-border-subtle" />
+
+      {/* Platform selector skeleton */}
+      <div className="flex flex-col gap-2">
+        <div className="h-3 w-16 rounded bg-arbiter-elevated" />
+        <div className="flex flex-col gap-1.5">
+          <div className="h-16 rounded-xl bg-arbiter-elevated border border-arbiter-border-subtle" />
+          <div className="h-16 rounded-xl bg-arbiter-elevated border border-arbiter-border-subtle" />
+        </div>
+      </div>
+
+      {/* Amount skeleton */}
+      <div className="flex flex-col gap-3">
+        <div className="h-3 w-14 rounded bg-arbiter-elevated" />
+        <div className="h-12 rounded-xl bg-arbiter-elevated border border-arbiter-border-subtle" />
+        <div className="flex gap-2">
+          {[1, 2, 3, 4].map((i) => (
+            <div key={i} className="flex-1 h-8 rounded-lg bg-arbiter-elevated border border-arbiter-border-subtle" />
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Helper: build platform options from the primary market + its match
+// ---------------------------------------------------------------------------
+
+function buildPlatformOptions(
+  market: Market,
+  matchedMarket: Market | undefined,
+): PlatformOption[] {
+  const options: PlatformOption[] = [];
+
+  const toOption = (m: Market): PlatformOption => ({
+    platform: m.platform,
+    label: m.platform === "KALSHI" ? "Kalshi" : "Polymarket",
+    yesPrice: m.yesPrice,
+    noPrice: m.noPrice,
+    liquidity: m.liquidity,
+  });
+
+  options.push(toOption(market));
+
+  if (matchedMarket) {
+    options.push(toOption(matchedMarket));
+  }
+
+  return options;
+}
+
 // ---------------------------------------------------------------------------
 // TradePanel
 // ---------------------------------------------------------------------------
 
-export function TradePanel({ isOpen, marketId, onClose }: TradePanelProps) {
+export function TradePanel({ isOpen, marketId, markets, onClose }: TradePanelProps) {
   // -- State ----------------------------------------------------------------
   const [side, setSide] = useState<Side>("YES");
   const [selectedPlatform, setSelectedPlatform] = useState<Platform>("POLYMARKET");
   const [amount, setAmount] = useState<string>("");
-  const [step, setStep] = useState<"configure" | "confirm">("configure");
+  const [step, setStep] = useState<TradeStep>("configure");
+  const [tradeError, setTradeError] = useState<string | null>(null);
 
-  // -- Derived data ---------------------------------------------------------
-  const market = MOCK_MARKET;
+  // Ref for the auto-close timer so we can clean it up
+  const successTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const activePlatform = useMemo(
-    () => market.platforms.find((p) => p.platform === selectedPlatform) ?? market.platforms[0],
-    [market.platforms, selectedPlatform],
+  // -- Find real market data ------------------------------------------------
+  const market = useMemo(
+    () => (marketId ? markets.find((m) => m.id === marketId) : undefined),
+    [marketId, markets],
   );
 
-  const price = side === "YES" ? activePlatform.yesPrice : activePlatform.noPrice;
+  const matchedMarket = useMemo(
+    () =>
+      market?.matchedMarketId
+        ? markets.find((m) => m.id === market.matchedMarketId)
+        : undefined,
+    [market, markets],
+  );
+
+  const platforms = useMemo(
+    () => (market ? buildPlatformOptions(market, matchedMarket) : []),
+    [market, matchedMarket],
+  );
+
+  // -- Derived data ---------------------------------------------------------
+  const activePlatform = useMemo(
+    () => platforms.find((p) => p.platform === selectedPlatform) ?? platforms[0],
+    [platforms, selectedPlatform],
+  );
+
+  const price = activePlatform
+    ? side === "YES"
+      ? activePlatform.yesPrice
+      : activePlatform.noPrice
+    : 0;
   const parsedAmount = parseFloat(amount) || 0;
-  const shares = parsedAmount > 0 ? parsedAmount / price : 0;
+  const shares = parsedAmount > 0 && price > 0 ? parsedAmount / price : 0;
   // At $1/share resolution, payout = shares * $1
   const payout = shares;
   const profit = payout - parsedAmount;
 
   const canConfirm = parsedAmount > 0;
 
+  // -- Reset selected platform when platforms change ------------------------
+  useEffect(() => {
+    if (platforms.length > 0 && !platforms.find((p) => p.platform === selectedPlatform)) {
+      setSelectedPlatform(platforms[0].platform);
+    }
+  }, [platforms, selectedPlatform]);
+
+  // -- Cleanup success timer on unmount -------------------------------------
+  useEffect(() => {
+    return () => {
+      if (successTimerRef.current) {
+        clearTimeout(successTimerRef.current);
+      }
+    };
+  }, []);
+
   // -- Handlers -------------------------------------------------------------
   const handleClose = useCallback(() => {
+    if (successTimerRef.current) {
+      clearTimeout(successTimerRef.current);
+      successTimerRef.current = null;
+    }
     setStep("configure");
     setAmount("");
     setSide("YES");
+    setTradeError(null);
     onClose();
   }, [onClose]);
 
   const handleConfirm = useCallback(() => {
     if (!canConfirm) return;
+    setTradeError(null);
     setStep("confirm");
   }, [canConfirm]);
 
   const handleBack = useCallback(() => {
+    setTradeError(null);
     setStep("configure");
   }, []);
 
-  const handleExecute = useCallback(() => {
-    // In a real implementation this would call the trade API.
-    // For now, close the panel after "executing".
-    handleClose();
-  }, [handleClose]);
+  const handleExecute = useCallback(async () => {
+    if (!market || !activePlatform) return;
+
+    setStep("executing");
+    setTradeError(null);
+
+    try {
+      const res = await fetch("/api/trade/execute", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          marketId: market.id,
+          platform: activePlatform.platform,
+          side,
+          shares,
+          limitPrice: price,
+        }),
+      });
+
+      const data = await res.json();
+
+      if (!res.ok || !data.success) {
+        // Surface Zod validation details if present
+        const detail =
+          data.details && Array.isArray(data.details)
+            ? data.details.map((d: { message: string }) => d.message).join("; ")
+            : data.error ?? "Trade execution failed";
+        setTradeError(detail);
+        setStep("confirm");
+        return;
+      }
+
+      // Execution succeeded -- show success animation then auto-close
+      setStep("success");
+      successTimerRef.current = setTimeout(() => {
+        handleClose();
+      }, 1500);
+    } catch {
+      setTradeError("Network error. Please try again.");
+      setStep("confirm");
+    }
+  }, [market, activePlatform, side, shares, price, handleClose]);
 
   // -- Render ---------------------------------------------------------------
+  const marketNotFound = isOpen && marketId && !market;
+
   return (
     <AnimatePresence>
       {isOpen && marketId && (
@@ -495,10 +623,16 @@ export function TradePanel({ isOpen, marketId, onClose }: TradePanelProps) {
             <div className="flex items-start justify-between gap-3 px-6 pt-6 pb-4 border-b border-arbiter-border-subtle">
               <div className="flex flex-col gap-1 min-w-0">
                 <span className="text-2xs font-semibold uppercase tracking-wider text-indigo-400">
-                  {step === "configure" ? "New Trade" : "Confirm Trade"}
+                  {step === "configure"
+                    ? "New Trade"
+                    : step === "confirm"
+                      ? "Confirm Trade"
+                      : step === "executing"
+                        ? "Executing..."
+                        : "Trade Placed"}
                 </span>
                 <h2 className="text-sm font-semibold text-text-primary leading-snug line-clamp-2">
-                  {market.title}
+                  {market?.title ?? "Loading market..."}
                 </h2>
               </div>
               <CloseButton onClick={handleClose} />
@@ -506,46 +640,140 @@ export function TradePanel({ isOpen, marketId, onClose }: TradePanelProps) {
 
             {/* ------- Body with step transitions ------- */}
             <div className="flex-1 overflow-y-auto no-scrollbar">
-              <AnimatePresence mode="wait">
-                {step === "configure" ? (
-                  <motion.div
-                    key="step-configure"
-                    variants={stepVariants}
-                    initial="enter"
-                    animate="center"
-                    exit="exit"
-                    transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}
-                    className="flex flex-col gap-6 px-6 py-6"
-                  >
-                    {/* Side selector */}
-                    <SideSelector selected={side} onSelect={setSide} />
+              {marketNotFound ? (
+                /* No market found -- show loading skeleton */
+                <PanelBodySkeleton />
+              ) : (
+                <AnimatePresence mode="wait">
+                  {step === "configure" ? (
+                    <motion.div
+                      key="step-configure"
+                      variants={stepVariants}
+                      initial="enter"
+                      animate="center"
+                      exit="exit"
+                      transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}
+                      className="flex flex-col gap-6 px-6 py-6"
+                    >
+                      {/* Side selector */}
+                      <SideSelector selected={side} onSelect={setSide} />
 
-                    {/* Platform selector */}
-                    <PlatformSelector
-                      platforms={market.platforms}
-                      selectedSide={side}
-                      selectedPlatform={selectedPlatform}
-                      onSelect={setSelectedPlatform}
-                    />
+                      {/* Platform selector */}
+                      <PlatformSelector
+                        platforms={platforms}
+                        selectedSide={side}
+                        selectedPlatform={selectedPlatform}
+                        onSelect={setSelectedPlatform}
+                      />
 
-                    {/* Position sizing */}
-                    <PositionSizer
-                      amount={amount}
-                      onAmountChange={setAmount}
-                      shares={shares}
-                      payout={payout}
-                    />
+                      {/* Position sizing */}
+                      <PositionSizer
+                        amount={amount}
+                        onAmountChange={setAmount}
+                        shares={shares}
+                        payout={payout}
+                      />
 
-                    {/* Order summary preview */}
-                    {canConfirm && (
-                      <motion.div
-                        initial={{ opacity: 0, y: 8 }}
-                        animate={{ opacity: 1, y: 0 }}
-                        transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}
-                      >
-                        <label className="text-2xs font-semibold uppercase tracking-wider text-text-tertiary mb-2 block">
-                          Order Summary
-                        </label>
+                      {/* Order summary preview */}
+                      {canConfirm && activePlatform && (
+                        <motion.div
+                          initial={{ opacity: 0, y: 8 }}
+                          animate={{ opacity: 1, y: 0 }}
+                          transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}
+                        >
+                          <label className="text-2xs font-semibold uppercase tracking-wider text-text-tertiary mb-2 block">
+                            Order Summary
+                          </label>
+                          <OrderSummary
+                            side={side}
+                            platform={activePlatform.label}
+                            shares={shares}
+                            price={price}
+                            total={parsedAmount}
+                            profit={profit}
+                          />
+                        </motion.div>
+                      )}
+                    </motion.div>
+                  ) : step === "confirm" ? (
+                    <motion.div
+                      key="step-confirm"
+                      variants={stepVariants}
+                      initial="enter"
+                      animate="center"
+                      exit="exit"
+                      transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}
+                      className="flex flex-col gap-6 px-6 py-6"
+                    >
+                      {/* Confirmation header */}
+                      <div className="flex flex-col items-center gap-3 py-4">
+                        <div
+                          className={cn(
+                            "flex items-center justify-center w-14 h-14 rounded-2xl",
+                            side === "YES"
+                              ? "bg-profit/15 border border-profit/25"
+                              : "bg-loss/15 border border-loss/25",
+                          )}
+                        >
+                          <svg
+                            width="24"
+                            height="24"
+                            viewBox="0 0 24 24"
+                            fill="none"
+                            className={side === "YES" ? "text-profit" : "text-loss"}
+                          >
+                            {side === "YES" ? (
+                              <path
+                                d="M5 13l4 4L19 7"
+                                stroke="currentColor"
+                                strokeWidth="2.5"
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                              />
+                            ) : (
+                              <path
+                                d="M6 6l12 12M18 6L6 18"
+                                stroke="currentColor"
+                                strokeWidth="2.5"
+                                strokeLinecap="round"
+                              />
+                            )}
+                          </svg>
+                        </div>
+                        <div className="flex flex-col items-center gap-1">
+                          <span className="text-lg font-semibold text-text-primary">
+                            Review Your Trade
+                          </span>
+                          <span className="text-xs text-text-tertiary text-center max-w-[280px]">
+                            Please review the details below before executing your trade.
+                          </span>
+                        </div>
+                      </div>
+
+                      {/* Error banner */}
+                      {tradeError && (
+                        <motion.div
+                          initial={{ opacity: 0, y: -8 }}
+                          animate={{ opacity: 1, y: 0 }}
+                          className="flex items-start gap-2 px-4 py-3 rounded-xl bg-loss/10 border border-loss/20"
+                        >
+                          <svg
+                            width="16"
+                            height="16"
+                            viewBox="0 0 16 16"
+                            fill="none"
+                            className="text-loss mt-0.5 shrink-0"
+                          >
+                            <circle cx="8" cy="8" r="7" stroke="currentColor" strokeWidth="1.5" />
+                            <path d="M8 5v3.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+                            <circle cx="8" cy="11" r="0.75" fill="currentColor" />
+                          </svg>
+                          <span className="text-xs text-loss leading-relaxed">{tradeError}</span>
+                        </motion.div>
+                      )}
+
+                      {/* Full summary */}
+                      {activePlatform && (
                         <OrderSummary
                           side={side}
                           platform={activePlatform.label}
@@ -554,121 +782,143 @@ export function TradePanel({ isOpen, marketId, onClose }: TradePanelProps) {
                           total={parsedAmount}
                           profit={profit}
                         />
-                      </motion.div>
-                    )}
-                  </motion.div>
-                ) : (
-                  <motion.div
-                    key="step-confirm"
-                    variants={stepVariants}
-                    initial="enter"
-                    animate="center"
-                    exit="exit"
-                    transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}
-                    className="flex flex-col gap-6 px-6 py-6"
-                  >
-                    {/* Confirmation header */}
-                    <div className="flex flex-col items-center gap-3 py-4">
-                      <div
-                        className={cn(
-                          "flex items-center justify-center w-14 h-14 rounded-2xl",
-                          side === "YES"
-                            ? "bg-profit/15 border border-profit/25"
-                            : "bg-loss/15 border border-loss/25",
-                        )}
+                      )}
+
+                      {/* Disclaimer */}
+                      <p className="text-2xs text-text-muted text-center leading-relaxed px-2">
+                        By executing this trade you acknowledge that prediction market
+                        outcomes are uncertain and you may lose your entire position.
+                      </p>
+                    </motion.div>
+                  ) : step === "executing" ? (
+                    <motion.div
+                      key="step-executing"
+                      variants={stepVariants}
+                      initial="enter"
+                      animate="center"
+                      exit="exit"
+                      transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}
+                      className="flex flex-col items-center justify-center gap-4 px-6 py-20"
+                    >
+                      {/* Spinner */}
+                      <motion.div
+                        animate={{ rotate: 360 }}
+                        transition={{ repeat: Infinity, duration: 1, ease: "linear" }}
+                        className="w-12 h-12 rounded-full border-[3px] border-arbiter-border-subtle border-t-indigo-500"
+                      />
+                      <span className="text-sm font-semibold text-text-secondary">
+                        Executing trade...
+                      </span>
+                      <span className="text-xs text-text-muted">
+                        Placing your order on {activePlatform?.label ?? "the platform"}
+                      </span>
+                    </motion.div>
+                  ) : (
+                    /* step === "success" */
+                    <motion.div
+                      key="step-success"
+                      variants={stepVariants}
+                      initial="enter"
+                      animate="center"
+                      exit="exit"
+                      transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}
+                      className="flex flex-col items-center justify-center gap-4 px-6 py-20"
+                    >
+                      {/* Green checkmark with scale-in animation */}
+                      <motion.div
+                        initial={{ scale: 0 }}
+                        animate={{ scale: 1 }}
+                        transition={{
+                          type: "spring",
+                          damping: 12,
+                          stiffness: 200,
+                          delay: 0.1,
+                        }}
+                        className="flex items-center justify-center w-16 h-16 rounded-full bg-profit/15 border-2 border-profit/30"
                       >
-                        <svg
-                          width="24"
-                          height="24"
+                        <motion.svg
+                          width="28"
+                          height="28"
                           viewBox="0 0 24 24"
                           fill="none"
-                          className={side === "YES" ? "text-profit" : "text-loss"}
+                          className="text-profit"
+                          initial={{ pathLength: 0, opacity: 0 }}
+                          animate={{ pathLength: 1, opacity: 1 }}
+                          transition={{ duration: 0.4, delay: 0.3 }}
                         >
-                          {side === "YES" ? (
-                            <path
-                              d="M5 13l4 4L19 7"
-                              stroke="currentColor"
-                              strokeWidth="2.5"
-                              strokeLinecap="round"
-                              strokeLinejoin="round"
-                            />
-                          ) : (
-                            <path
-                              d="M6 6l12 12M18 6L6 18"
-                              stroke="currentColor"
-                              strokeWidth="2.5"
-                              strokeLinecap="round"
-                            />
-                          )}
-                        </svg>
-                      </div>
-                      <div className="flex flex-col items-center gap-1">
-                        <span className="text-lg font-semibold text-text-primary">
-                          Review Your Trade
-                        </span>
-                        <span className="text-xs text-text-tertiary text-center max-w-[280px]">
-                          Please review the details below before executing your trade.
-                        </span>
-                      </div>
-                    </div>
-
-                    {/* Full summary */}
-                    <OrderSummary
-                      side={side}
-                      platform={activePlatform.label}
-                      shares={shares}
-                      price={price}
-                      total={parsedAmount}
-                      profit={profit}
-                    />
-
-                    {/* Disclaimer */}
-                    <p className="text-2xs text-text-muted text-center leading-relaxed px-2">
-                      By executing this trade you acknowledge that prediction market
-                      outcomes are uncertain and you may lose your entire position.
-                    </p>
-                  </motion.div>
-                )}
-              </AnimatePresence>
+                          <motion.path
+                            d="M5 13l4 4L19 7"
+                            stroke="currentColor"
+                            strokeWidth="2.5"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                            initial={{ pathLength: 0 }}
+                            animate={{ pathLength: 1 }}
+                            transition={{ duration: 0.4, delay: 0.3 }}
+                          />
+                        </motion.svg>
+                      </motion.div>
+                      <motion.span
+                        initial={{ opacity: 0, y: 8 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        transition={{ delay: 0.4 }}
+                        className="text-lg font-semibold text-profit"
+                      >
+                        Trade Placed!
+                      </motion.span>
+                      <motion.span
+                        initial={{ opacity: 0 }}
+                        animate={{ opacity: 1 }}
+                        transition={{ delay: 0.5 }}
+                        className="text-xs text-text-muted"
+                      >
+                        Your order has been submitted successfully.
+                      </motion.span>
+                    </motion.div>
+                  )}
+                </AnimatePresence>
+              )}
             </div>
 
             {/* ------- Footer action buttons ------- */}
-            <div className="px-6 pb-6 pt-4 border-t border-arbiter-border-subtle">
-              {step === "configure" ? (
-                <button
-                  type="button"
-                  disabled={!canConfirm}
-                  onClick={handleConfirm}
-                  className="arbiter-btn-primary w-full py-3 text-sm"
-                >
-                  Confirm Trade
-                </button>
-              ) : (
-                <div className="flex flex-col gap-2">
+            {!marketNotFound && step !== "executing" && step !== "success" && (
+              <div className="px-6 pb-6 pt-4 border-t border-arbiter-border-subtle">
+                {step === "configure" ? (
                   <button
                     type="button"
-                    onClick={handleExecute}
-                    className={cn(
-                      "w-full py-3 text-sm font-semibold rounded-xl",
-                      "text-white transition-all duration-200 ease-spring",
-                      "shadow-glow-lg hover:brightness-110 active:brightness-90",
-                      side === "YES"
-                        ? "bg-profit hover:bg-profit/90"
-                        : "bg-loss hover:bg-loss/90",
-                    )}
+                    disabled={!canConfirm}
+                    onClick={handleConfirm}
+                    className="arbiter-btn-primary w-full py-3 text-sm"
                   >
-                    Execute Trade
+                    Confirm Trade
                   </button>
-                  <button
-                    type="button"
-                    onClick={handleBack}
-                    className="arbiter-btn-secondary w-full py-2.5 text-sm"
-                  >
-                    Back
-                  </button>
-                </div>
-              )}
-            </div>
+                ) : (
+                  <div className="flex flex-col gap-2">
+                    <button
+                      type="button"
+                      onClick={handleExecute}
+                      className={cn(
+                        "w-full py-3 text-sm font-semibold rounded-xl",
+                        "text-white transition-all duration-200 ease-spring",
+                        "shadow-glow-lg hover:brightness-110 active:brightness-90",
+                        side === "YES"
+                          ? "bg-profit hover:bg-profit/90"
+                          : "bg-loss hover:bg-loss/90",
+                      )}
+                    >
+                      Execute Trade
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleBack}
+                      className="arbiter-btn-secondary w-full py-2.5 text-sm"
+                    >
+                      Back
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
           </motion.aside>
         </>
       )}

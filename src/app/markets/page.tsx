@@ -7,6 +7,7 @@ import { PageHeader } from "@/components/layout/page-header";
 import { MarketCard, MarketCardSkeleton } from "@/components/market/market-card";
 import { TradePanel } from "@/components/trade/trade-panel";
 import { usePriceStream } from "@/hooks/use-price-stream";
+import { useLiveUnifiedMarkets } from "@/hooks/use-live-market";
 import { useUIStore } from "@/stores/ui-store";
 import { cn } from "@/lib/utils";
 import type { Market, UnifiedMarket } from "@/types";
@@ -99,10 +100,13 @@ export default function MarketsPage() {
     refetchInterval: 60_000,
   });
 
-  const unifiedMarkets = useMemo(() => {
+  const baseUnifiedMarkets = useMemo(() => {
     if (!data?.markets) return [];
     return buildUnifiedMarkets(data.markets);
   }, [data]);
+
+  // Apply live SSE price updates to the unified markets
+  const unifiedMarkets = useLiveUnifiedMarkets(baseUnifiedMarkets);
 
   const filteredMarkets = useMemo(() => {
     let markets = unifiedMarkets;
@@ -208,6 +212,7 @@ export default function MarketsPage() {
       <TradePanel
         isOpen={tradePanelOpen}
         marketId={tradePanelMarketId}
+        markets={data?.markets ?? []}
         onClose={closeTradePanel}
       />
     </>

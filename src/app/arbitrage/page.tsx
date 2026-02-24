@@ -4,6 +4,7 @@ import { useQuery } from "@tanstack/react-query";
 import { PageHeader } from "@/components/layout/page-header";
 import { ArbitrageScanner, ArbitrageScannerSkeleton } from "@/components/market/arbitrage-scanner";
 import { usePriceStream } from "@/hooks/use-price-stream";
+import { useLiveArbitrage } from "@/hooks/use-live-arbitrage";
 import type { ArbitrageOpportunity } from "@/types";
 
 interface ArbScanResponse {
@@ -25,9 +26,32 @@ export default function ArbitragePage() {
     refetchInterval: 15_000,
   });
 
+  // Apply live price updates to recalculate spreads in real-time
+  const liveOpportunities = useLiveArbitrage(data?.opportunities ?? []);
+
   const handleExecute = async (opportunityId: string) => {
-    // In production: call /api/trade/execute for both legs
-    console.log("Executing arbitrage:", opportunityId);
+    const opp = liveOpportunities.find((o) => o.id === opportunityId);
+    if (!opp) return;
+
+    try {
+      const res = await fetch("/api/trade/execute", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          marketId: opp.marketA.externalId,
+          platform: opp.marketA.platform,
+          side: opp.marketA.yesPrice < opp.marketB.yesPrice ? "YES" : "NO",
+          shares: 100,
+          limitPrice: Math.min(opp.marketA.yesPrice, opp.marketB.yesPrice),
+        }),
+      });
+      const result = await res.json();
+      if (!result.success) {
+        console.error("Arbitrage execution failed:", result.error);
+      }
+    } catch (err) {
+      console.error("Arbitrage execution error:", err);
+    }
   };
 
   return (
@@ -50,7 +74,7 @@ export default function ArbitragePage() {
         <ArbitrageScannerSkeleton />
       ) : (
         <ArbitrageScanner
-          opportunities={data?.opportunities ?? []}
+          opportunities={liveOpportunities}
           isLoading={isLoading}
           onExecute={handleExecute}
         />

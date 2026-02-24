@@ -1,11 +1,30 @@
 "use client";
 
+import { useEffect, useState, useCallback } from "react";
 import { usePathname } from "next/navigation";
 import Link from "next/link";
 import { motion, AnimatePresence } from "framer-motion";
 import { useUIStore } from "@/stores/ui-store";
 import { cn } from "@/lib/utils";
 import type { ConnectionStatus } from "@/types";
+
+const MOBILE_BREAKPOINT = 768;
+
+function useIsMobile() {
+  const [isMobile, setIsMobile] = useState(false);
+
+  useEffect(() => {
+    const mql = window.matchMedia(`(max-width: ${MOBILE_BREAKPOINT - 1}px)`);
+    const onChange = (e: MediaQueryListEvent | MediaQueryList) => {
+      setIsMobile(e.matches);
+    };
+    onChange(mql);
+    mql.addEventListener("change", onChange);
+    return () => mql.removeEventListener("change", onChange);
+  }, []);
+
+  return isMobile;
+}
 
 const navItems = [
   {
@@ -48,20 +67,19 @@ function ConnectionDot({ status }: { status: ConnectionStatus }) {
   );
 }
 
-export function Sidebar() {
+/** Shared sidebar content used by both desktop and mobile layouts */
+function SidebarContent({
+  collapsed,
+  onNavClick,
+}: {
+  collapsed: boolean;
+  onNavClick?: () => void;
+}) {
   const pathname = usePathname();
-  const { sidebarCollapsed, toggleSidebar, connections, setConnectionModal } =
-    useUIStore();
+  const { connections, setConnectionModal, toggleSidebar } = useUIStore();
 
   return (
-    <motion.aside
-      initial={false}
-      animate={{ width: sidebarCollapsed ? 72 : 256 }}
-      transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}
-      className="fixed left-0 top-0 h-screen z-40 flex flex-col
-                 bg-arbiter-surface/95 backdrop-blur-2xl
-                 border-r border-arbiter-border-subtle"
-    >
+    <>
       {/* Logo */}
       <div className="flex items-center gap-3 px-5 h-16 border-b border-arbiter-border-subtle">
         <div className="flex-shrink-0 w-8 h-8 rounded-xl bg-indigo-500 flex items-center justify-center">
@@ -74,7 +92,7 @@ export function Sidebar() {
           </svg>
         </div>
         <AnimatePresence mode="wait">
-          {!sidebarCollapsed && (
+          {!collapsed && (
             <motion.span
               initial={{ opacity: 0, x: -8 }}
               animate={{ opacity: 1, x: 0 }}
@@ -96,6 +114,7 @@ export function Sidebar() {
             <Link
               key={item.href}
               href={item.href}
+              onClick={onNavClick}
               className={cn(
                 "flex items-center gap-3 px-3 py-2.5 rounded-xl transition-all duration-200",
                 "group relative",
@@ -118,7 +137,7 @@ export function Sidebar() {
                 )}
               />
               <AnimatePresence mode="wait">
-                {!sidebarCollapsed && (
+                {!collapsed && (
                   <motion.span
                     initial={{ opacity: 0 }}
                     animate={{ opacity: 1 }}
@@ -148,7 +167,7 @@ export function Sidebar() {
             <ConnectionDot status={connections.POLYMARKET} />
           </div>
           <AnimatePresence mode="wait">
-            {!sidebarCollapsed && (
+            {!collapsed && (
               <motion.div
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}
@@ -171,15 +190,15 @@ export function Sidebar() {
           </AnimatePresence>
         </button>
 
-        {/* Collapse toggle */}
+        {/* Collapse toggle (desktop only) */}
         <button
           onClick={toggleSidebar}
           className="w-full flex items-center justify-center p-2 rounded-xl
                      text-text-muted hover:text-text-secondary hover:bg-arbiter-elevated
-                     transition-all duration-200"
+                     transition-all duration-200 hidden md:flex"
         >
           <motion.svg
-            animate={{ rotate: sidebarCollapsed ? 180 : 0 }}
+            animate={{ rotate: collapsed ? 180 : 0 }}
             transition={{ duration: 0.2 }}
             width="16"
             height="16"
@@ -192,6 +211,71 @@ export function Sidebar() {
           </motion.svg>
         </button>
       </div>
+    </>
+  );
+}
+
+export function Sidebar() {
+  const isMobile = useIsMobile();
+  const { sidebarCollapsed, mobileMenuOpen, setMobileMenuOpen } = useUIStore();
+
+  const closeMobile = useCallback(() => {
+    setMobileMenuOpen(false);
+  }, [setMobileMenuOpen]);
+
+  // Close mobile menu on route change
+  const pathname = usePathname();
+  useEffect(() => {
+    setMobileMenuOpen(false);
+  }, [pathname, setMobileMenuOpen]);
+
+  // --- Mobile sidebar (overlay) ---
+  if (isMobile) {
+    return (
+      <AnimatePresence>
+        {mobileMenuOpen && (
+          <>
+            {/* Backdrop */}
+            <motion.div
+              key="mobile-backdrop"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.2 }}
+              className="fixed inset-0 z-40 bg-black/60 backdrop-blur-sm"
+              onClick={closeMobile}
+            />
+
+            {/* Slide-in sidebar */}
+            <motion.aside
+              key="mobile-sidebar"
+              initial={{ x: -280 }}
+              animate={{ x: 0 }}
+              exit={{ x: -280 }}
+              transition={{ duration: 0.25, ease: [0.16, 1, 0.3, 1] }}
+              className="fixed left-0 top-0 h-screen w-[280px] z-50 flex flex-col
+                         bg-arbiter-surface/95 backdrop-blur-2xl
+                         border-r border-arbiter-border-subtle"
+            >
+              <SidebarContent collapsed={false} onNavClick={closeMobile} />
+            </motion.aside>
+          </>
+        )}
+      </AnimatePresence>
+    );
+  }
+
+  // --- Desktop sidebar (original behavior) ---
+  return (
+    <motion.aside
+      initial={false}
+      animate={{ width: sidebarCollapsed ? 72 : 256 }}
+      transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}
+      className="fixed left-0 top-0 h-screen z-40 flex flex-col
+                 bg-arbiter-surface/95 backdrop-blur-2xl
+                 border-r border-arbiter-border-subtle"
+    >
+      <SidebarContent collapsed={sidebarCollapsed} />
     </motion.aside>
   );
 }
